@@ -82,8 +82,7 @@ sudo docker compose config --quiet
 sudo docker compose pull
 ```
 
-`0.4.3` 仅为版本格式示例，不代表最新发布。镜像数字标签采用 `X.Y.Z`，不带 `v`；发布还会更新 `latest`，生产部署建议固定数字版本或 digest。私有源仓库的 Git 发布标签仍可为 `vX.Y.Z`，工作流会剥离 `v` 后生成镜像标签。
-
+`0.4.3` 仅为版本格式示例，不代表最新发布。镜像数字标签采用 `X.Y.Z`，不带 `v`；发布还会更新 `latest`，生产部署建议固定数字版本或 digest。
 `PAYROLL_SECRET_KEY` 留空时，程序在 `/data` 生成并持续使用 `server.key`。日常升级不得删除或随意替换该密钥。`.env`、数据卷和证书配置不应提交到 GitHub。
 
 ## 3 配置 HTTPS 反向代理

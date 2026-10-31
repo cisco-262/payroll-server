@@ -1,223 +1,247 @@
-# Payroll Server
+# OpsHome Payslip Server 部署与后台还原指南
 
-**Self-hosted payroll delivery for organizations. Official iOS client. Your infrastructure, your data.**
+适用于 Self-Hosted Community Edition 的 Go 企业服务端，按 R27 交付配置整理。服务端保存企业员工、工资条和设备绑定，员工通过官方 iOS 客户端访问。本文覆盖 Docker Compose 首次部署、保留数据升级，以及通过 Web 后台上传加密备份还原。
 
-[English](#english) · [简体中文](#简体中文)
+首次部署必须按顺序执行 `db-upgrade`、`init-company`、`create-admin`，然后启动服务。当前版本没有网页初始化向导。后台还原也需要先建立一个可登录的临时环境，再上传原备份；成功后使用备份中的原管理员重新登录。
 
-> **Release preparation — not yet a verified public release.** This repository is intended for official deployment files, documentation and signed-off release artifacts. Image names, download locations, and the App Store link must be published and verified before the first public release. Do not deploy placeholder image names.
+## 1 部署前准备
 
----
+- Linux 服务器，以及已安装并可用的 Docker Engine 和 Docker Compose 插件。
+- 官方发布的镜像地址与明确的版本号。镜像支持 Linux AMD64 和 ARM64。
+- 企业公网域名及公网可信 HTTPS 证书；反向代理将 HTTPS 请求转发到服务端 HTTP 端口。
+- 持久数据卷、可用磁盘空间、正常系统时间，以及管理员 TOTP 验证器。
+- 如需灾备还原，准备已下载到服务器之外的 `.enc` 快照、独立备份口令和原管理员 MFA。
 
-<a id="english"></a>
+普通部署使用官方运行镜像，不需要 Go、Xcode、源码或 Garble seed。Self-Hosted Community Edition 不表示源码已开源；使用限制以随发行版提供的许可为准。
 
-## English
+## 2 准备 Compose 与环境配置
 
-### What is Payroll Server?
-
-Payroll Server is the self-hosted backend for **OpsHome Payroll**. It helps an organization prepare, review, publish and deliver employee payslips while keeping its primary payroll database on infrastructure it operates or controls.
-
-The **Community Edition** is intended to be distributed as an official compiled container image and release binaries, together with deployment documentation. The proprietary Go backend source code is **not** included in this public distribution repository.
-
-**The employee mobile client is the official OpsHome Payroll iOS app distributed through the Apple App Store.** The license does not authorize third-party, repackaged, or independently developed mobile clients to use employee mobile APIs. Administrators can use the authorized browser-based management console.
-
-### Capabilities and scope
-
-The R25-based release is intended to preserve the verified Payroll workflows, including:
-
-| Area | Intended functionality |
-| --- | --- |
-| Payroll delivery | Import, review and publish payslips; review published history and corrections |
-| Approval workflow | HR- or finance-led review paths, with configurable approval/release steps |
-| Access management | Separate administrator, HR, finance and employee permissions |
-| Employee enrollment | In-person, time-limited QR pairing and an additional temporary verification code |
-| Employee access | Payslip viewing through a paired official iOS app |
-| Deployment | Self-hosted Docker deployment, persistent data and HTTPS access |
-| Initial geographic templates | Mainland China and Hong Kong |
-
-**Release gate:** The public R25 Go build and the matching official iOS build must be regression-tested together before these capabilities are represented as generally available. Specific workflows, export controls, offline behavior and security mechanisms must follow the tested release notes, not assumptions from earlier Python builds.
-
-Payroll Server is a **payslip distribution and workflow product**, not a substitute for a payroll calculation engine, statutory tax calculation, MPF processing or filing system. Organizations remain responsible for the correctness of their payroll figures and local legal compliance.
-
-### Editions and licensing
-
-- **Community Edition:** No server software license fee for use permitted by the accompanying license; self-hosted by the organization.
-- **Source model:** Proprietary, source-closed. Public GitHub visibility does **not** make this an open-source project.
-- **Mobile client:** The official App Store iOS application is separately distributed under its applicable terms. Its price and availability, if any, are determined by the official listing.
-- **Other offerings:** Commercial editions, database engines, support or integrations may be offered separately; they are not promised as part of this release.
-
-Read the complete [Payroll Server Community Edition License](LICENSE.md) before using or distributing the Software. Third-party dependencies retain their own applicable licenses.
-
-> The `LICENSE.md` copyright holder, contact address and jurisdiction fields must be finalized before an official release.
-
-### Official iOS client
-
-**App Store link:** Not published in this README until the genuine listing and developer identity are verified.
-
-For employee mobile pairing and salary-slip retrieval, use only the genuine official App Store app. The client must connect to the organization's configured **public HTTPS origin** using a certificate trusted by iOS.
-
-Client authenticity, pairing, device binding and server-side authorization are separate security controls. **Do not assume that App Attest or another attestation mechanism is enforced in a particular build until that build passes the published release verification.** An app name, Bundle ID string or User-Agent alone is not proof of authenticity.
-
-**Administrative browser access is not subject to the employee-mobile-client requirement.**
-
-### Deployment model
-
-```text
-Employee iPhone (official App Store app)
-                 |
-         Trusted public HTTPS
-                 |
-        Organization's reverse proxy
-                 |
-          Protected backend HTTP
-                 |
-      Payroll Server (Go container)
-                 |
-      Persistent storage (/data)
-```
-
-The server can also expose an **internal HTTPS administration endpoint** when the released build supports and enables that feature. An environment variable or exposed port alone does not create a TLS listener.
-
-### Prerequisites
-
-- Linux server with Docker Engine and Docker Compose
-- Organization-controlled persistent storage and a separate backup destination
-- A DNS name reachable by authorized employee devices, with a publicly trusted TLS certificate for iOS
-- A properly configured reverse proxy, or a supported verified TLS deployment mode
-- Firewall rules limiting backend HTTP access to designated trusted reverse proxies
-- The **official** Compose file, configuration template, and image tag from the same published release
-
-### Quick start (after the official release is published)
-
-The commands below assume that the public repository **already contains** the verified `docker-compose.yml` and `.env.example` files and that the Compose file references an **actual published official image**. They cannot be used to install a release that has not been uploaded.
+创建专用目录，例如 `~/payroll-go`。以下是仅发布 HTTP 上游端口的部署示例；如已有官方 Compose 文件，可保留原文件并核对对应变量。
 
 ```bash
-git clone <OFFICIAL_REPOSITORY_URL>
-cd payroll-server
-
-cp .env.example .env
-chmod 600 .env
-
-# Edit .env: public HTTPS URL, trusted hosts/proxy sources,
-# ports, stable secrets and the intended persistent data volume.
-nano .env
-
-docker compose config --quiet
-docker compose pull
-docker compose up -d
-docker compose ps
-docker compose logs --tail=100
+mkdir -p ~/payroll-go
+cd ~/payroll-go
 ```
 
-Replace `<OFFICIAL_REPOSITORY_URL>` with the verified URL after publication. The initial organization and administrator setup procedures will be documented for the **actual R25 Go release**; do not reuse Python/Flask initialization commands.
+保存为 `compose.yml`：
 
-**Important:** Never put real employee records, salary files, private keys, `.env`, database files or backups in this public repository.
+```yaml
+services:
+  payroll:
+    image: ${PAYROLL_IMAGE:?Set the official image and version}
+    ports:
+      - "${PAYROLL_LAN_IP:-127.0.0.1}:${PAYROLL_HTTP_PORT:-8098}:8000"
+    environment:
+      PAYROLL_LISTEN: "0.0.0.0:8000"
+      PAYROLL_DATABASE_URL: "sqlite:////data/payroll.sqlite3"
+      PAYROLL_SECRET_KEY: ${PAYROLL_SECRET_KEY:-}
+      PAYROLL_PUBLIC_URL: ${PAYROLL_PUBLIC_URL:?Set the public HTTPS origin}
+      PAYROLL_TRUSTED_HOSTS: ${PAYROLL_TRUSTED_HOSTS:?Set the allowed hosts}
+      PAYROLL_PROXY_HOPS: "1"
+      PAYROLL_TRUSTED_PROXY_CIDRS: ${PAYROLL_TRUSTED_PROXY_CIDRS:?Set the actual proxy source CIDRs}
+      PAYROLL_DEV_MODE: "0"
+      PAYROLL_CLIENT_LICENSE_ALLOW_SANDBOX: ${PAYROLL_CLIENT_LICENSE_ALLOW_SANDBOX:-0}
+      PAYROLL_WORK_HOURS_ENABLED: ${PAYROLL_WORK_HOURS_ENABLED:-0}
+      PAYROLL_CLIENT_CREDIT_ENABLED: ${PAYROLL_CLIENT_CREDIT_ENABLED:-1}
+      PAYROLL_CLIENT_CREDIT_TEXT: ${PAYROLL_CLIENT_CREDIT_TEXT:-}
+    volumes:
+      - payroll-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=320m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
 
-### Key configuration concepts
+volumes:
+  payroll-data:
+    name: ${PAYROLL_DATA_VOLUME:?Set a persistent volume name}
+```
 
-The following names correspond to the current Go deployment configuration discussed for R25. Refer to the released `.env.example` and Compose file for exact defaults and support.
+保存为 `.env`，并将示例值改为实际配置：
 
-| Setting | Purpose |
+```dotenv
+# 示例镜像地址与版本，替换为发布方实际提供的值。
+PAYROLL_IMAGE=your-dockerhub-user/payroll-server:0.4.3
+PAYROLL_DATA_VOLUME=payroll-go-data
+PAYROLL_LAN_IP=127.0.0.1
+PAYROLL_HTTP_PORT=8098
+PAYROLL_PUBLIC_URL=https://payroll.example.com
+PAYROLL_TRUSTED_HOSTS=payroll.example.com,localhost,127.0.0.1
+# 填反向代理连接到容器时的实际来源 CIDR，不能直接照抄通用网段。
+PAYROLL_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+PAYROLL_CLIENT_LICENSE_ALLOW_SANDBOX=0
+PAYROLL_WORK_HOURS_ENABLED=0
+PAYROLL_SECRET_KEY=
+```
+
+```bash
+chmod 600 .env
+sudo docker compose config --quiet
+sudo docker compose pull
+```
+
+`0.4.3` 仅为版本格式示例，不代表最新发布。镜像数字标签采用 `X.Y.Z`，不带 `v`；发布还会更新 `latest`，生产部署建议固定数字版本或 digest。私有源仓库的 Git 发布标签仍可为 `vX.Y.Z`，工作流会剥离 `v` 后生成镜像标签。
+
+`PAYROLL_SECRET_KEY` 留空时，程序在 `/data` 生成并持续使用 `server.key`。日常升级不得删除或随意替换该密钥。`.env`、数据卷和证书配置不应提交到 GitHub。
+
+## 3 配置 HTTPS 反向代理
+
+同机反向代理可连接 `127.0.0.1:8098`；不同主机反代需将 `PAYROLL_LAN_IP` 改为明确的内网 IP，并用防火墙只允许反代主机访问上游端口。
+
+反代应保留原始 Host，正确传递 HTTPS 协议和客户端地址。例如 Nginx 的 location 中可使用以下头部配置，`proxy_pass` 根据实际网络修改：
+
+```nginx
+proxy_pass http://127.0.0.1:8098;
+proxy_set_header Host $http_host;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+```
+
+这段仅是转发示意，不包含完整的站点、证书和上传大小配置。可信代理 CIDR 必须匹配容器看到的实际 TCP 对端；Docker 网桥或多层反代可能使它不同于宿主机回环地址。不要以信任所有地址来解决 403。
+
+App 只使用公网域名与公网可信证书。内网 IP 自签名 HTTPS 仅用于管理后台；本示例未启用该可选端口。官方 App API 和授权回调不能被仅浏览器可完成的质询拦截。
+
+如上传备份出现 413 或超时，应检查反代及前置网关的请求大小、超时限制。服务端快照本身也有资源上限，不能仅通过调大反代参数实现无限容量。
+
+## 4 首次部署
+
+在 Compose 项目目录执行。每条命令成功后再继续下一条：
+
+```bash
+sudo docker compose run --rm payroll db-upgrade
+
+# 中国大陆用 CN，香港用 HK；企业名称替换为实际名称。
+sudo docker compose run --rm payroll init-company \
+  --name '企业名称' --region CN
+
+sudo docker compose run --rm payroll create-admin --username admin
+
+sudo docker compose up -d
+sudo docker compose ps
+sudo docker compose logs --tail=100 payroll
+```
+
+创建管理员时按提示输入并确认密码；程序只显示一次敏感的 TOTP 登记 URI。将它添加到管理员的验证器，不要公开到截图、工单或 CI 日志。随后通过企业 HTTPS 地址登录后台，使用密码和动态验证码完成认证。
+
+系统管理员默认具备系统管理及设备管理能力。人事导入、审核、财务和发布等业务权限按实际分工授权，不应将创建系统管理员理解为自动获得全部业务角色。
+
+正式企业默认 `PAYROLL_CLIENT_LICENSE_ALLOW_SANDBOX=0`。仅 TestFlight 测试环境按需设为 `1`；它不关闭官方 App 验证，App Attest 也不应因此改用 development。
+
+## 5 创建后台加密备份
+
+1. 使用系统管理员登录，打开「加密备份与灾备还原」，路径为 `/admin/system/backups`。
+2. 设置至少 16 个字符的独立备份口令，并重复输入确认。
+3. 下载全量加密快照 `.enc`，确认浏览器下载完成。
+4. 将快照保存在服务器之外，并与口令分开保管。记录备份时间、运行镜像版本和企业公开 HTTPS 地址。
+
+快照包含一致性数据库、服务端身份密钥和用于还原校验的信任配置。数据库中包含员工、工资条、业务配置、设备绑定及相应认证状态。快照不会自动重建宿主机、Docker、DNS、反代、证书或 `.env`，这些部署配置需另行安全保存。
+
+备份口令不等于后台密码或 MFA，丢失后无法找回。备份之后新增的工资条、审批和设备变更不会出现在旧快照中。不要将运行中的 SQLite 主文件直接复制后当成全量一致性备份。
+
+## 6 保留数据升级
+
+先在后台下载备份，保留原数据卷、`.env` 和企业公开 origin。在 `.env` 中将 `PAYROLL_IMAGE` 改为已发布的新数字版本，然后执行：
+
+```bash
+sudo docker compose pull
+sudo docker compose stop payroll
+sudo docker compose run --rm payroll db-upgrade
+sudo docker compose up -d
+sudo docker compose logs --tail=100 payroll
+```
+
+已有数据库升级不执行 `init-company` 或 `create-admin`，不需要重新创建企业、管理员或员工。普通用户拉取镜像即可；私有源码构建是维护者流程，不能把 `--build` 当作清空数据库的方法。
+
+`sudo docker compose down` 删除容器和项目网络，保留普通命名数据卷；重新启动后原账户仍可用属于预期行为。`down -v` 或 `docker volume rm` 可能删除持久数据，不用于日常升级。
+
+修改 `.env` 后通过 `docker compose up -d` 重新创建容器以应用新配置。仅 `docker restart` 不会更新既有容器的环境变量。回滚旧镜像前确认数据库结构兼容；不兼容时应使用升级前备份与对应版本恢复。
+
+## 7 空服务器通过后台还原
+
+### 7.1 准备恢复目标
+
+在新主机安装 Docker 并准备 Compose、`.env` 和反代。建议先使用与备份时相同的官方镜像版本，完成恢复后再按升级流程升级。
+
+必须将 `PAYROLL_PUBLIC_URL` 配置为备份中的原企业 HTTPS origin，包括原有的非默认端口。公网可信证书、DNS 或反代入口须正常工作；官方信任参数与 App 身份也要匹配。后台会拒绝不匹配的信任链或公开地址，不应通过删除校验来绕过。
+
+使用新数据卷进行恢复。异机部署可以保留相同卷名；同一主机演练则使用不同的新卷名，并停掉原容器以避免端口冲突，防止误覆盖原系统。卷名只表示存储位置，不是企业身份。
+
+### 7.2 建立可登录的临时后台
+
+在恢复目标的 Compose 目录执行：
+
+```bash
+sudo docker compose pull
+sudo docker compose run --rm payroll db-upgrade
+
+# 地区按原企业选择 CN 或 HK。
+sudo docker compose run --rm payroll init-company \
+  --name '灾备还原临时环境' --region CN
+
+sudo docker compose run --rm payroll create-admin \
+  --username recovery-admin
+
+sudo docker compose up -d
+sudo docker compose ps
+sudo docker compose logs --tail=100 payroll
+```
+
+给临时管理员设置密码并登记此次生成的 TOTP。空卷没有原管理员，因此此时必须使用临时账号登录；不能假设原账号已经存在。不要导入正式工资或给员工重新配对。
+
+### 7.3 在网页上传备份
+
+1. 使用 `recovery-admin` 的临时密码与临时 MFA 登录新后台。
+2. 打开 `/admin/system/backups`，选择原 `.enc` 文件。
+3. 输入创建该快照时设置的独立备份口令。
+4. 输入大写 `RESTORE`，点击「校验并还原系统」。该操作替换当前系统，而非合并数据。
+5. 等待「灾备还原完成」页面，按提示重新登录。
+
+服务端先验证口令、格式、数据结构、信任参数及公开地址，成功后保存恢复前快照并切换数据库与身份密钥。新后台的临时企业、临时账号及其 MFA 会被原快照替换，当前后台登录会话会失效。
+
+### 7.4 使用原账号验证
+
+使用快照中的原管理员、原密码和原 MFA 重新登录。核对企业名称及 Logo、员工、工资批次、审批、回执与异议、后台角色以及设备绑定。数据应对应备份时点，不应期待恢复备份后的变更。
+
+iPhone 保持原企业绑定，不卸载、不主动解绑，解锁后刷新工资条。恢复保留原身份和设备记录；当会话令牌发生变化时，配套客户端可通过设备签名恢复通信。设备已被撤销、硬件密钥丢失或绑定晚于备份时点时，不能保证自动恢复，应按实际设备状态处理。
+
+还原成功后再次重启容器，复查原账号和 App 连接，确认恢复身份可持续使用。恢复前自动备份保存在数据卷的 `recovery-snapshots`，使用本次还原口令；它不能替代服务器外的独立备份。
+
+## 8 在原主机演练
+
+推荐停掉旧容器后，把 `.env` 中的 `PAYROLL_DATA_VOLUME` 改为一个新的、尚未使用的测试卷名，例如 `payroll-restore-test-20261031`。保留原卷不动，按照第 7 节建立临时后台并上传备份。
+
+这能模拟空数据库恢复，同时保留退回原系统的条件。若需退回，停掉测试容器，将 `.env` 恢复为原卷名及其兼容镜像版本，再启动。切换过程中不要让两个环境同时对外写入或重新绑定同一批设备。
+
+若明确需要删除旧卷测试，先确认服务器外备份可用、口令已保存，再核对实际卷名。以下只演示本次现场确认的 `payroll-go-data`，其他部署不能直接照抄：
+
+```bash
+sudo docker compose down
+sudo docker volume rm payroll-go-data
+sudo docker volume create payroll-go-data
+```
+
+删除后直接进入第 7.2 节。仅执行 `up -d` 不会替你初始化数据库和管理员；还原操作仍通过 Web 后台完成，不使用手工解压数据库代替。
+
+## 9 常见问题
+
+| 现象 | 检查与处理 |
 | --- | --- |
-| `PAYROLL_PUBLIC_URL` | Employee-facing trusted HTTPS origin; may include a non-default port |
-| `PAYROLL_LAN_IP` | Host LAN IP used for the designated backend port mapping |
-| `PAYROLL_HTTP_PORT` | Host HTTP port for a **restricted reverse-proxy upstream**, not a public login endpoint |
-| `PAYROLL_TRUSTED_HOSTS` | Explicitly accepted HTTP hosts |
-| `PAYROLL_TRUSTED_PROXY_CIDRS` | Actual trusted proxy source CIDRs; do not trust entire LANs by convenience |
-| `PAYROLL_INTERNAL_TLS_IP` | Optional host bind address for a supported internal TLS port mapping |
-| `PAYROLL_INTERNAL_TLS_PORT` | Internal HTTPS port when a genuine TLS listener/proxy is configured |
-| `PAYROLL_DATA_VOLUME` | Exact Docker volume name to preserve across upgrades |
+| 删除容器后原账户还能登录 | 数据卷被保留，属于正常重建。验证空系统应使用新卷或明确删除旧卷。 |
+| 空卷启动失败或旧账号不能登录 | 先 `db-upgrade`，再 `init-company`、`create-admin`；登录临时管理员。 |
+| 临时管理员也不能登录 | 使用本次生成的 TOTP，核对系统时间、HTTPS 与 Host；不要使用原账号的验证码。 |
+| 提示口令错误或快照损坏 | 核对备份口令和文件完整性，不以登录密码代替；验证失败时不应改动现有业务数据。 |
+| `SNAPSHOT_TRUST_MISMATCH` | 使用对应官方发行镜像，核对 App 身份与官方验签参数；不要关闭校验。 |
+| 提示使用原企业 HTTPS 域名 | 还原目标的 `PAYROLL_PUBLIC_URL` 必须与快照一致，包括端口。 |
+| 还原完成后临时账号失效 | 属于预期；改用备份中的原账号、原密码和原 MFA。 |
+| 上传返回 413 或超时 | 检查反代及前置网关上传限制、超时、可用磁盘与容器临时空间。 |
+| 提示 `SNAPSHOT_INCOMPATIBLE` | 核对备份与镜像版本，先使用原版本恢复；不要直接替换运行中的数据库文件。 |
+| 提示恢复切换中断 | 先保留数据卷与恢复前快照，按错误页提示重启完成恢复日志；不要再次清空卷。 |
+| 设备恢复后不能刷新 | 检查原 HTTPS origin、可信证书、设备状态、备份时点与配套客户端版本；保留错误码排查。 |
 
-Keep `PAYROLL_PUBLIC_URL` on HTTPS. In production, a direct HTTP request can be rejected with `HTTPS_REQUIRED`; a reverse proxy must pass correct HTTPS forwarding information and be explicitly trusted. The iOS app must **not** accept a self-signed certificate for the employee-facing public origin merely because internal administrator browsers may support a separate self-signed IP certificate.
+## 10 验收记录
 
-### Existing installations and upgrades
+2026 年 10 月 31 日，维护者在实际环境完成本指南对应的临时初始化及 Web 后台还原流程，并反馈完成。该记录表示该次流程已走通，不替代各企业对具体备份、版本、网络和设备的验收。
 
-**Preserve the existing server identity and data.** Before any upgrade:
-
-1. Record the actual Compose project name, environment file, image version and Docker volume name.
-2. Create a **restorable, encrypted backup** of the payroll database, server keys and necessary configuration. For SQLite, use a database-consistent backup procedure; do not assume that copying a live database file is sufficient.
-3. Test restoration separately and confirm that the backup is accessible outside the container host.
-4. Follow the migration notes for the specific release. Reuse the existing named volume and stable cryptographic keys.
-5. Pull the verified release image and recreate the service using the **same** Compose project and storage configuration; check logs, administrator login, employee accounts, roles and existing payslips.
-6. Confirm official iOS pairing and access before treating the upgrade as complete.
-
-**Never use `docker compose down -v` for a normal upgrade.** Do not reset or reinitialize the organization/admin just because the application reports a migration or data-readiness error. A new Compose project name can silently select a different volume and make existing data appear missing.
-
-### Security guidance
-
-- Publish the browser and mobile endpoints only through appropriately configured HTTPS.
-- Keep the backend HTTP upstream inaccessible from the public Internet.
-- Forward the original Host and HTTPS scheme through your **trusted** reverse proxy; verify the actual proxy source IP or container-network source.
-- Apply least privilege for administrators, HR, finance and employee accounts, and protect privileged sessions with the supported MFA controls.
-- Retain audit records, backups and encryption keys according to organizational policy and applicable law.
-- Restrict access to payroll data, secrets and server logs; do not publish diagnostic logs containing personal data.
-- Treat package checksums as **integrity checks**, not proof of code identity or an independent security audit. Verify signed artifacts where official signatures are available.
-
-### Releases, support and security reports
-
-- **Release artifacts:** Will appear in this repository's Releases section after publication and verification.
-- **Container images:** The official registry path and immutable image digest will be announced with the release. No unverified image path is supplied here.
-- **Supported architectures:** The planned R25 release targets Linux AMD64 and ARM64, subject to successful build and runtime validation.
-- **Security contact:** To be published by the licensor before public distribution; do not post confidential employee data in public issues.
-- **Support:** Community Edition does not include a guaranteed support SLA.
-
-### License
-
-Copyright © 2026 **[LEGAL NAME OF RIGHTS HOLDER]**. All rights reserved.
-
-See [`LICENSE.md`](LICENSE.md). Proprietary, no-charge self-hosted distribution; **not open source**. Apple and App Store are trademarks of Apple Inc.; Apple does not sponsor or endorse this software.
-
----
-
-<a id="简体中文"></a>
-
-## 简体中文
-
-### 项目介绍
-
-**Payroll Server** 是 **OpsHome Payroll** 的企业私有部署工资条后端。企业将服务器和主要薪资数据库部署在自己控制的基础设施上，通过管理后台完成人员管理、薪资条导入、审核与发布，并由员工在官方 iOS 客户端查阅工资条。
-
-**Community Edition（社区版）免费提供符合许可证条款的服务端使用授权，但并非开源软件。** 本公开仓库计划发布部署文件、说明文档和官方编译发行物，不公开 Go 核心业务源代码。
-
-### 主要业务范围
-
-- 人事专员导入 → 人事经理审核 → 可选财务发布。
-- 财务专员导入 → 财务经理审核 → 发布。
-- 支持自定义审批节点，最多三个节点；具体权限以发布版回归测试为准。
-- 系统管理员、人事、财务与普通员工账号分离，并按权限展示管理菜单。
-- 员工现场通过限时二维码及动态识别码完成设备配对。
-- 员工通过官方 iOS App 查阅已发布工资条及相应历史记录。
-- 首批部署目标为中国大陆与香港，默认采用自托管 SQLite 持久化方案。
-
-**状态声明：** 上述为目标发行功能范围，不能取代 R25 Go 后端与配套 iOS 正式版本的逐项测试结论。离线查看、导出权限、离职员工 PDF 权限等行为应以实际验证的版本说明为准。本项目不替代税务、MPF 或工资计算系统。
-
-### 仅使用官方 App Store 客户端
-
-企业员工移动端使用必须通过开发者在 **Apple App Store** 官方发布的 OpsHome Payroll App；未经授权的第三方客户端、修改版或重签名版不属于本许可证的授权范围。
-
-但**管理员的官方 Web 管理后台仍可正常使用浏览器访问**，不因上述要求受到限制。
-
-客户端真实性需要由服务端结合设备绑定、请求证明、身份与权限检查等机制验证。仅靠 App 名称、请求头或 Bundle ID 文本不能证明客户端合法。**Apple App Attest 是否已接入并生效，必须由具体发行版本的测试结果确认，不能在发布前宣称已实现。**
-
-### 部署及网络原则
-
-- **公网：** iOS 客户端必须使用组织配置的 HTTPS 域名与 iOS 信任的有效证书。
-- **反向代理：** 后端 HTTP 端口只能向明确允许的代理提供回源，不能直接暴露公网。
-- **内网：** 管理员可通过支持的内网 HTTPS 方案访问；IP 自签名证书仅用于单独配置的内网浏览器场景，不用于 iOS 公网配对。
-- **数据库：** SQLite 数据库与服务端密钥存放在持久化卷中；升级必须保留原卷。
-- **首次初始化：** 使用正式 Go 发行版本提供的流程，不沿用旧 Python/Flask 的管理命令。
-
-正式镜像发布后，再按上方 English / Quick start 部分的步骤下载**真实存在且已验证**的 Docker Compose 配置和镜像。
-
-### 升级时特别注意
-
-备份数据库、密钥和 `.env`，同时确认 Compose 项目名以及 `PAYROLL_DATA_VOLUME` 指向的真实 Docker 卷。备份必须可恢复；SQLite 应采用一致性备份。升级后检查管理员、员工、权限、工资记录和 iOS 客户端配对。
-
-**禁止把 `docker compose down -v` 当成日常升级命令。** 不要因配置错误而删除数据卷、重建组织、重设管理员或清空 MFA。
-
-### 许可协议
-
-本项目采用 [Payroll Server Community Edition License v1.0](LICENSE.md)，属于**免费使用的专有许可证**，不是 MIT、Apache、GPL、AGPL 等开源许可证。个人与企业可在协议允许范围内免费自托管；未经授权不得修改、再分发、转售服务端或使用第三方员工移动客户端。
-
-软件许可证不代表承诺未来全部功能永久免费，也不包含默认的托管服务或 SLA。企业自负主机维护、HTTPS、备份、数据隐私和当地合规责任。
-
-**首次公开发布前待完成：** 补全许可证版权主体与联系信息，核实官方 iOS App Store 链接、镜像地址、签名与校验材料，以及 Go R25 的真实功能回归测试。
+交付或演练时记录镜像版本及 digest、备份时间、还原时间、企业 origin、后台数据核对结果、原设备连接结果和重启后结果。不要在 GitHub Issue 中提交快照、口令、MFA URI、私钥或真实工资数据。
